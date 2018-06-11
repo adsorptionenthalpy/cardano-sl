@@ -16,19 +16,21 @@ module Test.Pos.Infra.Gen
 
 import           Universum
 
+import           Data.Time.Units (Millisecond, Microsecond,
+                                  fromMicroseconds)
 import           Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
-import           Data.Time.Units (Millisecond, Microsecond,
-                                  fromMicroseconds)
+import           Network.Kademlia.HashNodeId (genNonce, hashAddress)
 
 import           Pos.Core (EpochIndex (..), TimeDiff (..))
+import           Pos.Crypto.Random (deterministic)
 import           Pos.Infra.Communication.Types.Relay (DataMsg (..),
                                                       InvMsg (..),
                                                       MempoolMsg (..),
                                                       ReqMsg (..),
                                                       ResMsg (..))
-import           Pos.Infra.DHT (DHTData (..), DHTKey (..), bytesToDHTKey)
+import           Pos.Infra.DHT (DHTData (..), DHTKey (..))
 import           Pos.Infra.Slotting.Types (EpochSlottingData (..),
                                            SlottingData,
                                            createSlottingDataUnsafe)
@@ -53,12 +55,7 @@ genDataMsg :: Gen a -> Gen (DataMsg a)
 genDataMsg genA = DataMsg <$> genA
 
 genDHTKey :: Gen DHTKey
-genDHTKey = do
-    b <- gen32Bytes
-    let k = bytesToDHTKey b :: Either String DHTKey
-    case k of
-        Left _   -> error "Failed to generate a DHTKey."
-        Right dk -> pure dk
+genDHTKey = pure $ DHTKey $ hashAddress $ deterministic "nonce" genNonce
 
 genDHTData :: Gen DHTData
 genDHTData = pure $ DHTData ()
