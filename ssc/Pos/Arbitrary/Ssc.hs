@@ -26,17 +26,17 @@ import           Test.QuickCheck.Arbitrary.Generic (genericArbitrary, genericShr
 import           Pos.Arbitrary.Core (genVssCertificate)
 import           Pos.Arbitrary.Core.Unsafe ()
 import           Pos.Binary.Ssc ()
-import           Pos.Core (EpochIndex, SlotId (..), VssCertificate (..), VssCertificatesMap,
-                           mkVssCertificate, mkVssCertificatesMapLossy)
-import           Pos.Core.Configuration (HasProtocolConstants, protocolConstants)
+import           Pos.Core (BlockCount, EpochIndex, SlotId (..), VssCertificate (..),
+                           VssCertificatesMap, mkVssCertificate, mkVssCertificatesMapLossy,
+                           pcBlkSecurityParam)
 import           Pos.Core.ProtocolConstants (ProtocolConstants (..), VssMaxTTL (..), VssMinTTL (..))
 import           Pos.Core.Ssc (Commitment (..), CommitmentsMap, Opening (..), SignedCommitment,
                                SscPayload (..), SscProof (..), mkCommitmentsMap)
 import           Pos.Crypto (ProtocolMagic, SecretKey, deterministic, randomNumberInRange,
                              toVssPublicKey, vssKeyGen)
 import           Pos.Infra.Communication.Types.Relay (DataMsg (..))
-import           Pos.Ssc.Base (genCommitmentAndOpening, isCommitmentIdExplicit, isOpeningIdExplicit,
-                               isSharesIdExplicit, mkSignedCommitment)
+import           Pos.Ssc.Base (genCommitmentAndOpening, isCommitmentId, isOpeningId, isSharesId,
+                               mkSignedCommitment)
 import           Pos.Ssc.Message (MCCommitment (..), MCOpening (..), MCShares (..),
                                   MCVssCertificate (..), SscTag (..))
 import           Pos.Ssc.Toss.Types (TossModifier (..))
@@ -46,6 +46,16 @@ import           Pos.Ssc.VssCertData (VssCertData (..))
 import           Test.Pos.Crypto.Arbitrary (genSignature)
 import           Test.Pos.Crypto.Dummy (dummyProtocolMagic)
 import           Test.Pos.Util.QuickCheck.Arbitrary (Nonrepeating (..), sublistN)
+
+dummyProtocolConstants :: ProtocolConstants
+dummyProtocolConstants = ProtocolConstants
+    { pcK         = 10
+    , pcVssMinTTL = VssMinTTL 2
+    , pcVssMaxTTL = VssMaxTTL 6
+    }
+
+dummyK :: BlockCount
+dummyK = pcBlkSecurityParam dummyProtocolConstants
 
 ----------------------------------------------------------------------------
 -- Types
@@ -173,13 +183,13 @@ instance Arbitrary SscPayload where
     shrink = genericShrink
 
 -- | We need the 'ProtocolConstants' because they give meaning to 'SlotId'.
-genSscPayloadForSlot :: ProtocolMagic -> ProtocolConstants -> SlotId -> Gen SscPayload
-genSscPayloadForSlot pm pc slot
-    | isCommitmentIdExplicit pc slot =
+genSscPayloadForSlot :: ProtocolMagic -> SlotId -> Gen SscPayload
+genSscPayloadForSlot pm slot
+    | isCommitmentId dummyK slot =
         CommitmentsPayload <$> (genCommitments slot) <*> (genVssCerts slot)
-    | isOpeningIdExplicit pc slot =
+    | isOpeningId dummyK slot =
         OpeningsPayload <$> arbitrary <*> (genVssCerts slot)
-    | isSharesIdExplicit pc slot =
+    | isSharesId dummyK slot =
         SharesPayload <$> arbitrary <*> (genVssCerts slot)
     | otherwise =
         CertificatesPayload <$> (genVssCerts slot)
@@ -196,8 +206,8 @@ genSscPayloadForSlot pm pc slot
         arbitrary
     genValidCert SlotId{..} (sk, pk) = mkVssCertificate pm sk pk $ siEpoch + 5
 
-instance HasProtocolConstants => Arbitrary SscPayloadDependsOnSlot where
-    arbitrary = pure $ SscPayloadDependsOnSlot (genSscPayloadForSlot dummyProtocolMagic protocolConstants)
+instance Arbitrary SscPayloadDependsOnSlot where
+    arbitrary = pure $ SscPayloadDependsOnSlot (genSscPayloadForSlot dummyProtocolMagic)
 
 genVssCertificatesMap :: ProtocolMagic -> Gen VssCertificatesMap
 genVssCertificatesMap pm = do
@@ -208,11 +218,11 @@ instance Arbitrary VssCertificatesMap where
     arbitrary = genVssCertificatesMap dummyProtocolMagic
     shrink = genericShrink
 
-instance HasProtocolConstants => Arbitrary VssCertData where
+instance Arbitrary VssCertData where
     arbitrary = genericArbitrary
     shrink = genericShrink
 
-instance HasProtocolConstants => Arbitrary SscGlobalState where
+instance Arbitrary SscGlobalState where
     arbitrary = genericArbitrary
     shrink = genericShrink
 

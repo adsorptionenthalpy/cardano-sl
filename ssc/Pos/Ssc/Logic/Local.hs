@@ -29,9 +29,10 @@ import           System.Wlog (WithLogger, launchNamedPureLog, logWarning)
 
 import           Pos.Binary.Class (biSize)
 import           Pos.Binary.Ssc ()
-import           Pos.Core (BlockVersionData (..), EpochIndex, HasGenesisData, HasProtocolConstants,
-                           SlotId (..), StakeholderId, VssCertificate, epochIndexL,
-                           mkVssCertificatesMapSingleton)
+import           Pos.Core (BlockCount, BlockVersionData (..), EpochIndex, HasGenesisData,
+                           ProtocolConstants, SlotId (..), StakeholderId, VssCertificate,
+                           epochIndexL, kEpochSlots, mkVssCertificatesMapSingleton,
+                           pcBlkSecurityParam, pcEpochSlots)
 import           Pos.Core.Ssc (InnerSharesMap, Opening, SignedCommitment, SscPayload (..),
                                mkCommitmentsMap)
 import           Pos.Crypto (ProtocolMagic)
@@ -58,15 +59,15 @@ import           Pos.Ssc.Types (SscGlobalState, SscLocalData (..), ldEpoch, ldMo
 -- 'SlotId'. If payload for given 'SlotId' can't be constructed,
 -- empty payload can be returned.
 sscGetLocalPayload
-    :: forall ctx m.
-       (MonadIO m, MonadSscMem ctx m, WithLogger m, HasProtocolConstants)
-    => SlotId -> m SscPayload
-sscGetLocalPayload = sscRunLocalQuery . sscGetLocalPayloadQ
+    :: forall ctx m
+     . (MonadIO m, MonadSscMem ctx m, WithLogger m)
+    => BlockCount
+    -> SlotId
+    -> m SscPayload
+sscGetLocalPayload k = sscRunLocalQuery . sscGetLocalPayloadQ k
 
-sscGetLocalPayloadQ
-  :: (HasProtocolConstants)
-  => SlotId -> SscLocalQuery SscPayload
-sscGetLocalPayloadQ SlotId {..} = do
+sscGetLocalPayloadQ :: BlockCount -> SlotId -> SscLocalQuery SscPayload
+sscGetLocalPayloadQ k SlotId {..} = do
     expectedEpoch <- view ldEpoch
     let warningMsg = sformat warningFmt siEpoch expectedEpoch
     isExpected <-
@@ -78,9 +79,9 @@ sscGetLocalPayloadQ SlotId {..} = do
     warningFmt = "sscGetLocalPayloadQ: unexpected epoch ("%int%
                  ", stored one is "%int%")"
     getPayload True
-        | isCommitmentIdx siSlot = CommitmentsPayload <$> view tmCommitments
-        | isOpeningIdx siSlot = OpeningsPayload <$> view tmOpenings
-        | isSharesIdx siSlot = SharesPayload <$> view tmShares
+        | isCommitmentIdx k siSlot = CommitmentsPayload <$> view tmCommitments
+        | isOpeningIdx k siSlot = OpeningsPayload <$> view tmOpenings
+        | isSharesIdx k siSlot = SharesPayload <$> view tmShares
     getPayload _ = pure CertificatesPayload
     getCertificates isExpected
         | isExpected = view tmCertificates
@@ -90,8 +91,8 @@ sscGetLocalPayloadQ SlotId {..} = do
 -- best known chain. This function is assumed to be called after applying
 -- block and before releasing lock on block application.
 sscNormalize
-    :: forall ctx m.
-       ( MonadGState m
+    :: forall ctx m
+     . ( MonadGState m
        , MonadBlockDBRead m
        , MonadSscMem ctx m
        , HasLrcContext ctx
@@ -99,8 +100,10 @@ sscNormalize
        , MonadIO m
        , Rand.MonadRandom m
        )
-    => ProtocolMagic -> m ()
-sscNormalize pm = do
+    => ProtocolMagic
+    -> ProtocolConstants
+    -> m ()
+sscNormalize pm pc = do
     tipEpoch <- view epochIndexL <$> getTipHeader
     richmenData <- getSscRichmen "sscNormalize" tipEpoch
     bvd <- gsAdoptedBVData
@@ -112,24 +115,25 @@ sscNormalize pm = do
     launchNamedPureLog atomically $
         syncingStateWith localVar $
         executeMonadBaseRandom seed $
-        sscNormalizeU pm (tipEpoch, richmenData) bvd gs
+        sscNormalizeU pm pc (tipEpoch, richmenData) bvd gs
   where
     -- (... MonadPseudoRandom) a -> (... n) a
     executeMonadBaseRandom seed = hoist $ hoist (pure . fst . Rand.withDRG seed)
 
 sscNormalizeU
-    :: (HasProtocolConstants, HasGenesisData)
+    :: HasGenesisData
     => ProtocolMagic
+    -> ProtocolConstants
     -> (EpochIndex, RichmenStakes)
     -> BlockVersionData
     -> SscGlobalState
     -> SscLocalUpdate ()
-sscNormalizeU pm (epoch, stake) bvd gs = do
+sscNormalizeU pm pc (epoch, stake) bvd gs = do
     oldModifier <- use ldModifier
     let multiRichmen = HM.fromList [(epoch, stake)]
     newModifier <-
         evalPureTossWithLogger gs $ supplyPureTossEnv (multiRichmen, bvd) $
-        execTossT mempty $ normalizeToss pm epoch oldModifier
+        execTossT mempty $ normalizeToss pm pc epoch oldModifier
     ldModifier .= newModifier
     ldEpoch .= epoch
     ldSize .= biSize newModifier
@@ -146,12 +150,14 @@ sscIsDataUseful
        , MonadSscMem ctx m
        , Rand.MonadRandom m
        , HasGenesisData
-       , HasProtocolConstants
        )
-    => SscTag -> StakeholderId -> m Bool
-sscIsDataUseful tag id =
+    => BlockCount
+    -> SscTag
+    -> StakeholderId
+    -> m Bool
+sscIsDataUseful k tag id =
     ifM
-        (maybe False (isGoodSlotForTag tag . siSlot) <$> getCurrentSlot)
+        (maybe False (isGoodSlotForTag k tag . siSlot) <$> getCurrentSlot (kEpochSlots k))
         (evalTossInMem $ sscIsDataUsefulDo tag)
         (pure False)
   where
@@ -192,10 +198,11 @@ type SscDataProcessingMode ctx m =
 sscProcessCommitment
     :: SscDataProcessingMode ctx m
     => ProtocolMagic
+    -> ProtocolConstants
     -> SignedCommitment
     -> m (Either SscVerifyError ())
-sscProcessCommitment pm comm =
-    sscProcessData pm CommitmentMsg
+sscProcessCommitment pm pc comm =
+    sscProcessData pm pc CommitmentMsg
         $ CommitmentsPayload (mkCommitmentsMap [comm]) mempty
 
 -- | Process 'Opening' received from network, checking it against
@@ -203,10 +210,11 @@ sscProcessCommitment pm comm =
 sscProcessOpening
     :: SscDataProcessingMode ctx m
     => ProtocolMagic
+    -> ProtocolConstants
     -> StakeholderId
     -> Opening
     -> m (Either SscVerifyError ())
-sscProcessOpening pm id opening = sscProcessData pm OpeningMsg
+sscProcessOpening pm pc id opening = sscProcessData pm pc OpeningMsg
     $ OpeningsPayload (HM.fromList [(id, opening)]) mempty
 
 -- | Process 'InnerSharesMap' received from network, checking it against
@@ -214,31 +222,34 @@ sscProcessOpening pm id opening = sscProcessData pm OpeningMsg
 sscProcessShares
     :: SscDataProcessingMode ctx m
     => ProtocolMagic
+    -> ProtocolConstants
     -> StakeholderId
     -> InnerSharesMap
     -> m (Either SscVerifyError ())
-sscProcessShares pm id shares =
-    sscProcessData pm SharesMsg $ SharesPayload (HM.fromList [(id, shares)]) mempty
+sscProcessShares pm pc id shares =
+    sscProcessData pm pc SharesMsg $ SharesPayload (HM.fromList [(id, shares)]) mempty
 
 -- | Process 'VssCertificate' received from network, checking it against
 -- current state (global + local) and adding to local state if it's valid.
 sscProcessCertificate
     :: SscDataProcessingMode ctx m
     => ProtocolMagic
+    -> ProtocolConstants
     -> VssCertificate
     -> m (Either SscVerifyError ())
-sscProcessCertificate pm cert = sscProcessData pm VssCertificateMsg
+sscProcessCertificate pm pc cert = sscProcessData pm pc VssCertificateMsg
     $ CertificatesPayload (mkVssCertificatesMapSingleton cert)
 
 sscProcessData
     :: SscDataProcessingMode ctx m
     => ProtocolMagic
+    -> ProtocolConstants
     -> SscTag
     -> SscPayload
     -> m (Either SscVerifyError ())
-sscProcessData pm tag payload =
+sscProcessData pm pc tag payload =
     runExceptT $ do
-        getCurrentSlot >>= checkSlot
+        getCurrentSlot (pcEpochSlots pc) >>= checkSlot
         ld <- sscRunLocalQuery ask
         bvd <- gsAdoptedBVData
         let epoch = ld ^. ldEpoch
@@ -250,11 +261,11 @@ sscProcessData pm tag payload =
                 ExceptT $
                     sscRunLocalSTM $
                     executeMonadBaseRandom seed $
-                    sscProcessDataDo pm (epoch, richmen) bvd gs payload
+                    sscProcessDataDo pm pc (epoch, richmen) bvd gs payload
   where
     checkSlot Nothing = throwError CurrentSlotUnknown
     checkSlot (Just si@SlotId {..})
-        | isGoodSlotForTag tag siSlot = pass
+        | isGoodSlotForTag (pcBlkSecurityParam pc) tag siSlot = pass
         | CommitmentMsg <- tag = throwError $ NotCommitmentPhase si
         | OpeningMsg <- tag = throwError $ NotOpeningPhase si
         | SharesMsg <- tag = throwError $ NotSharesPhase si
@@ -263,15 +274,19 @@ sscProcessData pm tag payload =
     executeMonadBaseRandom seed = hoist $ hoist (pure . fst . Rand.withDRG seed)
 
 sscProcessDataDo
-    :: (MonadState SscLocalData m, HasGenesisData
-      , WithLogger m, Rand.MonadRandom m, HasProtocolConstants)
+    :: ( MonadState SscLocalData m
+       , HasGenesisData
+       , WithLogger m
+       , Rand.MonadRandom m
+       )
     => ProtocolMagic
+    -> ProtocolConstants
     -> (EpochIndex, RichmenStakes)
     -> BlockVersionData
     -> SscGlobalState
     -> SscPayload
     -> m (Either SscVerifyError ())
-sscProcessDataDo pm richmenData bvd gs payload =
+sscProcessDataDo pm pc richmenData bvd gs payload =
     runExceptT $ do
         storedEpoch <- use ldEpoch
         let givenEpoch = fst richmenData
@@ -288,14 +303,15 @@ sscProcessDataDo pm richmenData bvd gs payload =
                | otherwise ->
                    evalPureTossWithLogger gs .
                    supplyPureTossEnv (multiRichmen, bvd) .
-                   execTossT mempty . refreshToss pm givenEpoch =<<
+                   execTossT mempty . refreshToss pm pc givenEpoch =<<
                    use ldModifier
         newTM <-
             ExceptT $
             evalPureTossWithLogger gs $
             supplyPureTossEnv (multiRichmen, bvd) $
             runExceptT $
-            execTossT oldTM $ verifyAndApplySscPayload pm (Left storedEpoch) payload
+            execTossT oldTM $
+            verifyAndApplySscPayload pm pc (Left storedEpoch) payload
         ldModifier .= newTM
         -- If mempool was exhausted, it's easier to recompute total size.
         -- Otherwise (most common case) we don't want to spend time on it and

@@ -12,13 +12,12 @@ import           Formatting (build, sformat, (%))
 import           Serokell.Util.Text (listJsonIndent)
 import           System.Wlog (logDebug, logInfo)
 
-import           Pos.Core (SoftwareVersion (..))
+import           Pos.Core (BlockCount, SoftwareVersion (..), kEpochSlots, kSlotSecurityParam)
 import           Pos.Core.Update (UpdateProposal (..))
 import           Pos.Infra.Diffusion.Types (Diffusion)
 import           Pos.Infra.Recovery.Info (recoveryCommGuard)
 import           Pos.Infra.Shutdown (triggerShutdown)
-import           Pos.Infra.Slotting.Util (ActionTerminationPolicy (..),
-                                          OnNewSlotParams (..),
+import           Pos.Infra.Slotting.Util (ActionTerminationPolicy (..), OnNewSlotParams (..),
                                           defaultOnNewSlotParams, onNewSlot)
 import           Pos.Update.Configuration (curSoftwareVersion)
 import           Pos.Update.Context (UpdateContext (..))
@@ -31,26 +30,25 @@ import           Pos.Util.Util (lensOf)
 
 -- | Update System related workers.
 usWorkers
-    :: forall ctx m.
-       ( UpdateMode ctx m
-       )
-    => [Diffusion m -> m ()]
-usWorkers = [processNewSlotWorker, checkForUpdateWorker]
+    :: forall ctx m . UpdateMode ctx m => BlockCount -> [Diffusion m -> m ()]
+usWorkers k = [processNewSlotWorker, checkForUpdateWorker]
   where
     -- These are two separate workers. We want them to run in parallel
     -- and not affect each other.
     processNewSlotParams = defaultOnNewSlotParams
-        { onspTerminationPolicy =
-              NewSlotTerminationPolicy "Update.processNewSlot"
+        { onspTerminationPolicy = NewSlotTerminationPolicy
+            "Update.processNewSlot"
         }
-    processNewSlotWorker = \_ ->
-        onNewSlot processNewSlotParams $ \s ->
-            recoveryCommGuard "processNewSlot in US" $ do
+    processNewSlotWorker _ =
+        onNewSlot (kEpochSlots k) processNewSlotParams $ \s ->
+            recoveryCommGuard (kSlotSecurityParam k) "processNewSlot in US" $ do
                 logDebug "Updating slot for US..."
                 processNewSlot s
-    checkForUpdateWorker = \_ ->
-        onNewSlot defaultOnNewSlotParams $ \_ ->
-            recoveryCommGuard "checkForUpdate" (checkForUpdate @ctx @m)
+    checkForUpdateWorker _ =
+        onNewSlot (kEpochSlots k) defaultOnNewSlotParams $ \_ ->
+            recoveryCommGuard (kSlotSecurityParam k)
+                              "checkForUpdate"
+                              (checkForUpdate @ctx @m)
 
 checkForUpdate ::
        forall ctx m. UpdateMode ctx m

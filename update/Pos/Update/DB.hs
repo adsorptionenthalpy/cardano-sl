@@ -50,9 +50,9 @@ import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Binary.Class (serialize')
 import           Pos.Binary.Update ()
-import           Pos.Core (ApplicationName, BlockVersion, ChainDifficulty, NumSoftwareVersion,
-                           SlotId, SoftwareVersion (..), StakeholderId, TimeDiff (..), epochSlots,
-                           HasCoreConfiguration)
+import           Pos.Core (ApplicationName, BlockVersion, ChainDifficulty, HasCoreConfiguration,
+                           NumSoftwareVersion, ProtocolConstants, SlotId, SoftwareVersion (..),
+                           StakeholderId, TimeDiff (..), pcEpochSlots)
 import           Pos.Core.Configuration (genesisBlockVersionData)
 import           Pos.Core.Update (BlockVersionData (..), UpId, UpdateProposal (..))
 import           Pos.Crypto (hash)
@@ -61,8 +61,7 @@ import           Pos.DB (DBIteratorClass (..), DBTag (..), IterType, MonadDB, Mo
 import           Pos.DB.Error (DBError (DBMalformed))
 import           Pos.DB.GState.Common (gsGetBi, writeBatchGState)
 import           Pos.Infra.Binary ()
-import           Pos.Infra.Slotting.Types (EpochSlottingData (..),
-                                           SlottingData,
+import           Pos.Infra.Slotting.Types (EpochSlottingData (..), SlottingData,
                                            createInitSlottingData)
 import           Pos.Update.Configuration (HasUpdateConfiguration, ourAppName, ourSystemTag)
 import           Pos.Update.Constants (genesisBlockVersion, genesisSoftwareVersions)
@@ -168,8 +167,8 @@ instance HasCoreConfiguration => RocksBatchOp UpdateOp where
 -- Initialization
 ----------------------------------------------------------------------------
 
-initGStateUS :: MonadDB m => m ()
-initGStateUS = do
+initGStateUS :: MonadDB m => ProtocolConstants -> m ()
+initGStateUS pc = do
     writeBatchGState $
         PutSlottingData genesisSlottingData :
         PutEpochProposers mempty :
@@ -179,7 +178,7 @@ initGStateUS = do
     genesisSlotDuration = bvdSlotDuration genesisBlockVersionData
 
     genesisEpochDuration :: Microsecond
-    genesisEpochDuration = fromIntegral epochSlots * convertUnit genesisSlotDuration
+    genesisEpochDuration = fromIntegral (pcEpochSlots pc) * convertUnit genesisSlotDuration
 
     esdCurrent :: EpochSlottingData
     esdCurrent = EpochSlottingData

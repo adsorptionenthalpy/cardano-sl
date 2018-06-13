@@ -9,26 +9,23 @@ import           Universum
 
 import           Data.Time.Units (Microsecond, convertUnit)
 
-import           Pos.Core.Configuration (epochSlots, HasProtocolConstants)
-import           Pos.Core.Slotting (EpochIndex, LocalSlotIndex, SlotId (..), Timestamp (..),
-                                    addTimeDiffToTimestamp, flattenEpochIndex, mkLocalSlotIndex,
-                                    unflattenSlotId)
+import           Pos.Core.Slotting (EpochIndex, LocalSlotIndex, SlotCount, SlotId (..),
+                                    Timestamp (..), addTimeDiffToTimestamp, flattenEpochIndex,
+                                    localSlotIndexMinBound, mkLocalSlotIndex, unflattenSlotId)
 import           Pos.Util.Util (leftToPanic)
 
-import           Pos.Infra.Slotting.MemState (MonadSlotsData, getSystemStartM,
-                                              withSlottingVarAtomM)
-import           Pos.Infra.Slotting.Types (EpochSlottingData (..),
-                                           SlottingData, getAllEpochIndices,
-                                           getCurrentEpochIndex,
-                                           getNextEpochSlottingData,
+import           Pos.Infra.Slotting.MemState (MonadSlotsData, getSystemStartM, withSlottingVarAtomM)
+import           Pos.Infra.Slotting.Types (EpochSlottingData (..), SlottingData, getAllEpochIndices,
+                                           getCurrentEpochIndex, getNextEpochSlottingData,
                                            lookupEpochSlottingData)
 
 -- | Approximate current slot using outdated slotting data.
 approxSlotUsingOutdated
-    :: (MonadSlotsData ctx m, HasProtocolConstants)
-    => Timestamp
+    :: MonadSlotsData ctx m
+    => SlotCount
+    -> Timestamp
     -> m SlotId
-approxSlotUsingOutdated t = do
+approxSlotUsingOutdated epochSlots t = do
 
     -- This is a constant and doesn't need to be fetched atomically
     systemStart <- getSystemStartM
@@ -38,15 +35,15 @@ approxSlotUsingOutdated t = do
 
     let epochStart = esdStartDiff nextSlottingData `addTimeDiffToTimestamp` systemStart
     pure $
-        if | t < epochStart -> SlotId (currentEpochIndex + 1) minBound
+        if | t < epochStart -> SlotId (currentEpochIndex + 1) localSlotIndexMinBound
            | otherwise      -> outdatedEpoch systemStart t (currentEpochIndex + 1) nextSlottingData
   where
     outdatedEpoch systemStart (Timestamp curTime) epoch EpochSlottingData {..} =
         let duration = convertUnit esdSlotDuration
             start = getTimestamp (esdStartDiff `addTimeDiffToTimestamp` systemStart)
         in
-        unflattenSlotId $
-        flattenEpochIndex epoch + fromIntegral ((curTime - start) `div` duration)
+        unflattenSlotId epochSlots $
+        flattenEpochIndex epochSlots epoch + fromIntegral ((curTime - start) `div` duration)
 
     -- | Get both values we need in a single fetch, so we don't end up with
     -- invalid data.
@@ -61,10 +58,11 @@ approxSlotUsingOutdated t = do
 -- | Compute current slot from current timestamp based on data
 -- provided by 'MonadSlotsData'.
 slotFromTimestamp
-    :: (MonadSlotsData ctx m, HasProtocolConstants)
-    => Timestamp
+    :: MonadSlotsData ctx m
+    => SlotCount
+    -> Timestamp
     -> m (Maybe SlotId)
-slotFromTimestamp approxCurTime = do
+slotFromTimestamp epochSlots approxCurTime = do
     systemStart <- getSystemStartM
     withSlottingVarAtomM (iterateBackwardsSearch systemStart)
   where
@@ -138,7 +136,7 @@ slotFromTimestamp approxCurTime = do
         localSlot :: LocalSlotIndex
         localSlot =
             leftToPanic "computeSlotUsingEpoch: " $
-            mkLocalSlotIndex localSlotNumeric
+            mkLocalSlotIndex epochSlots localSlotNumeric
 
         slotDuration :: Microsecond
         slotDuration = convertUnit esdSlotDuration

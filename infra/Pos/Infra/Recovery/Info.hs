@@ -5,7 +5,6 @@ module Pos.Infra.Recovery.Info
        ( SyncStatus (..)
        , MonadRecoveryInfo(..)
        , recoveryInProgress
-       , getSyncStatusK
        , recoveryCommGuard
        , needTriggerRecovery
        ) where
@@ -16,7 +15,7 @@ import qualified Data.Text.Buildable
 import           Formatting (bprint, build, sformat, stext, (%))
 import           System.Wlog (WithLogger, logDebug)
 
-import           Pos.Core (SlotCount, SlotId, slotIdF, slotSecurityParam, HasProtocolConstants)
+import           Pos.Core (SlotCount, SlotId, slotIdF)
 
 -- | An algebraic data type which represents how well we are
 -- synchronized with the network.
@@ -77,25 +76,13 @@ recoveryInProgress =
         SSDoingRecovery -> True
         _ -> False
 
--- | Get sync status using K as lagBehind param.
-getSyncStatusK :: (MonadRecoveryInfo m, HasProtocolConstants) => m SyncStatus
-getSyncStatusK = getSyncStatus lagBehindParam
-  where
-    -- It's actually questionable which value to use here. The less it
-    -- is, the stricter is the condition to do some
-    -- work. 'slotSecurityParam' is reasonable, but maybe we should use
-    -- something smaller.
-    lagBehindParam :: SlotCount
-    lagBehindParam = slotSecurityParam
-
 -- | This is a helper function which runs given action only if we are
 -- kinda synchronized with the network.  It is useful for workers
 -- which shouldn't do anything while we are not synchronized.
 recoveryCommGuard
-    :: (MonadRecoveryInfo m, WithLogger m, HasProtocolConstants)
-    => Text -> m () -> m ()
-recoveryCommGuard actionName action =
-    getSyncStatusK >>= \case
+    :: (MonadRecoveryInfo m, WithLogger m) => SlotCount -> Text -> m () -> m ()
+recoveryCommGuard slotSecurityParam actionName action =
+    getSyncStatus slotSecurityParam >>= \case
         SSKindaSynced -> action
         status ->
             logDebug $

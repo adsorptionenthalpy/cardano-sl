@@ -39,17 +39,16 @@ import           Formatting (build, int, sformat, (%))
 import           System.Wlog (WithLogger, logDebug, logNotice)
 
 import           Pos.Binary.Update ()
-import           Pos.Core (BlockVersion (..), Coin, EpochIndex, HeaderHash, HasProtocolConstants,
-                           IsMainHeader (..), SlotId, SoftforkRule (..), TimeDiff (..), addressHash,
-                           applyCoinPortionUp, coinPortionDenominator, coinToInteger, difficultyL,
-                           epochSlots, getCoinPortion, headerHashG, isBootstrapEra, CoinPortion (..),
-                           sumCoins, unsafeAddCoin, unsafeIntegerToCoin, unsafeSubCoin)
+import           Pos.Core (BlockVersion (..), Coin, CoinPortion (..), EpochIndex, HeaderHash,
+                           IsMainHeader (..), SlotCount, SlotId, SoftforkRule (..), TimeDiff (..),
+                           addressHash, applyCoinPortionUp, coinPortionDenominator, coinToInteger,
+                           difficultyL, getCoinPortion, headerHashG, isBootstrapEra, sumCoins,
+                           unsafeAddCoin, unsafeIntegerToCoin, unsafeSubCoin)
 import           Pos.Core.Update (BlockVersionData (..), BlockVersionModifier (..), UpId,
                                   UpdateProposal (..), UpdateVote (..))
 import           Pos.Crypto (PublicKey, hash, shortHashF)
-import           Pos.Infra.Slotting.Types (EpochSlottingData (..),
-                                           SlottingData, addEpochSlottingData,
-                                           getCurrentEpochIndex,
+import           Pos.Infra.Slotting.Types (EpochSlottingData (..), SlottingData,
+                                           addEpochSlottingData, getCurrentEpochIndex,
                                            getNextEpochSlottingData)
 import           Pos.Update.Poll.Class (MonadPoll (..), MonadPollRead (..))
 import           Pos.Update.Poll.Failure (PollVerFailure (..))
@@ -196,10 +195,11 @@ adoptBlockVersion winningBlk bv = do
 -- @SlottingData@ from the update. We can recieve updated epoch @SlottingData@
 -- and from it, changed epoch/slot times, which is important to keep track of.
 updateSlottingData
-    :: (HasProtocolConstants, MonadError PollVerFailure m, MonadPoll m)
-    => EpochIndex
+    :: (MonadError PollVerFailure m, MonadPoll m)
+    => SlotCount
+    -> EpochIndex
     -> m ()
-updateSlottingData epochIndex = do
+updateSlottingData epochSlots epochIndex = do
     let errFmt =
             ("can't update slotting data, stored current epoch is "%int%
              ", while given epoch is "%int%

@@ -14,15 +14,27 @@ import           Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import           Test.QuickCheck (Arbitrary (..), Property, choose, infiniteListOf, suchThat, (===))
 
 import           Pos.Arbitrary.Core ()
-import           Pos.Core (Coin, HasConfiguration, SharedSeed, StakeholderId, StakesList,
-                           addressHash, blkSecurityParam, defaultCoreConfiguration, epochSlots,
-                           mkCoin, sumCoins, unsafeAddCoin, unsafeIntegerToCoin, withGenesisSpec)
+import           Pos.Core (Coin, ProtocolConstants (..), SharedSeed, SlotCount, StakeholderId,
+                           StakesList, addressHash, mkCoin, pcEpochSlots, sumCoins, unsafeAddCoin,
+                           unsafeIntegerToCoin)
 import           Pos.Crypto (PublicKey)
 import           Pos.Lrc.Fts (followTheSatoshi)
 import           Test.Pos.Util.QuickCheck.Property (qcNotElem)
 
+import           Pos.Core (ProtocolConstants (..), VssMaxTTL (..), VssMinTTL (..))
+
+dummyProtocolConstants :: ProtocolConstants
+dummyProtocolConstants = ProtocolConstants
+    { pcK         = 10
+    , pcVssMinTTL = VssMinTTL 2
+    , pcVssMaxTTL = VssMaxTTL 6
+    }
+
+dummyEpochSlots :: SlotCount
+dummyEpochSlots = pcEpochSlots dummyProtocolConstants
+
 spec :: Spec
-spec = withGenesisSpec 0 defaultCoreConfiguration $ \_ -> do
+spec = do
   let smaller = modifyMaxSuccess (const 1)
   describe "Pos.Lrc.FtsPure" $ do
     describe "followTheSatoshi" $ do
@@ -83,40 +95,47 @@ instance Arbitrary StakeAndHolder where
             stakesList = map addressHash (toList restPks) `zip` values
         return (myPk, stakesList)
 
-ftsListLength :: HasConfiguration => SharedSeed -> StakeAndHolder -> Property
+ftsListLength
+    :: SharedSeed
+    -> StakeAndHolder
+    -> Property
 ftsListLength seed (getNoStake -> (_, stakes)) =
-  length (followTheSatoshi seed stakes) === fromIntegral epochSlots
+    length (followTheSatoshi dummyEpochSlots seed stakes)
+        === fromIntegral dummyEpochSlots
 
-ftsNoStake :: HasConfiguration => SharedSeed -> StakeAndHolder -> Property
+ftsNoStake
+    :: SharedSeed
+    -> StakeAndHolder
+    -> Property
 ftsNoStake seed (getNoStake -> (addressHash -> sId, stakes)) =
-  sId `qcNotElem` followTheSatoshi seed stakes
+  sId `qcNotElem` followTheSatoshi dummyEpochSlots seed stakes
 
 -- It will be broken if 'Coin' is 0, but 'arbitrary' can't generate 0
 -- for unknown reason.
-ftsAllStake :: HasConfiguration => SharedSeed -> PublicKey -> Coin -> Bool
+ftsAllStake :: SharedSeed -> PublicKey -> Coin -> Bool
 ftsAllStake seed pk v =
   let stakes = [(addressHash pk, v)]
-  in  all (== addressHash pk) $ followTheSatoshi seed stakes
+  in  all (== addressHash pk) $ followTheSatoshi dummyEpochSlots seed stakes
 
 -- | Constant specifying the number of times 'ftsReasonableStake' will be
 -- run.
-numberOfRuns :: HasConfiguration => Int
+numberOfRuns :: Int
 -- The higher is 'blkSecurityParam', the longer epochs will be and the more
 -- time FTS will take
-numberOfRuns = 300000 `div` fromIntegral blkSecurityParam
+numberOfRuns = 300000 `div` pcK dummyProtocolConstants
 
 newtype FtsStream = Stream
     { getStream :: [SharedSeed]
     } deriving Show
 
-instance HasConfiguration => Arbitrary FtsStream where
-    arbitrary = Stream . take numberOfRuns <$> infiniteListOf arbitrary
+instance Arbitrary FtsStream where
+  arbitrary = Stream . take numberOfRuns <$> infiniteListOf arbitrary
 
 newtype StakesStream = StakesStream
     { getStakesStream :: [StakeAndHolder]
     } deriving Show
 
-instance HasConfiguration => Arbitrary StakesStream where
+instance Arbitrary StakesStream where
     arbitrary = StakesStream . take numberOfRuns <$> infiniteListOf arbitrary
 
 -- | This test is a sanity check to verify that 'followTheSatoshi' does not
@@ -132,8 +151,7 @@ instance HasConfiguration => Arbitrary StakesStream where
 -- For a low/high stake, the test succeeds if this comparison is below/above the
 -- threshold, respectively.
 ftsReasonableStake
-  :: HasConfiguration
-  => Double
+  :: Double
   -> ((Int, Double, Double) -> Bool)
   -> FtsStream
   -> StakesStream
@@ -170,7 +188,7 @@ ftsReasonableStake stakeProbability threshold (getStream     -> ftsList) (getSta
         / (1 - stakeProbability)
     newStakes :: [(StakeholderId, Coin)]
     newStakes = (addressHash pk, newStake) : stakes
-    picks     = followTheSatoshi seed newStakes
+    picks     = followTheSatoshi dummyEpochSlots seed newStakes
     pLen      = length picks
     newPresent =
       present + if stId `elem` picks then 1 / (fromIntegral numberOfRuns) else 0

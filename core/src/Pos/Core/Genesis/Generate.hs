@@ -31,8 +31,8 @@ import           Pos.Core.Common (Address, Coin, IsBootstrapEraAddr (..), Stakeh
                                   addressHash, applyCoinPortionDown, coinToInteger,
                                   deriveFirstHDAddress, makePubKeyAddressBoot, mkCoin, sumCoins,
                                   unsafeIntegerToCoin)
-import           Pos.Core.Configuration.Protocol (HasProtocolConstants, vssMaxTTL, vssMinTTL)
 import           Pos.Core.Delegation (HeavyDlgIndex (..), ProxySKHeavy)
+import           Pos.Core.ProtocolConstants (ProtocolConstants, vssMaxTTL, vssMinTTL)
 import           Pos.Core.Ssc (VssCertificate, mkVssCertificate, mkVssCertificatesMap)
 import           Pos.Crypto (EncryptedSecretKey, ProtocolMagic, RedeemPublicKey, SecretKey,
                              VssKeyPair, createPsk, deterministic, emptyPassphrase, encToSecret,
@@ -93,12 +93,12 @@ data GeneratedSecrets = GeneratedSecrets
     }
 
 generateGenesisData
-    :: HasProtocolConstants
-    => ProtocolMagic
+    :: ProtocolMagic
+    -> ProtocolConstants
     -> GenesisInitializer
     -> GenesisAvvmBalances
     -> GeneratedGenesisData
-generateGenesisData pm (GenesisInitializer{..}) realAvvmBalances = deterministic (serialize' giSeed) $ do
+generateGenesisData pm pc (GenesisInitializer{..}) realAvvmBalances = deterministic (serialize' giSeed) $ do
     let TestnetBalanceOptions{..} = giTestBalance
 
     -- apply ggdAvvmBalanceFactor
@@ -154,7 +154,7 @@ generateGenesisData pm (GenesisInitializer{..}) realAvvmBalances = deterministic
             map ((,1) . addressHash . toPublic) bootSecrets
 
     -- VSS certificates
-    vssCertsList <- mapM (generateVssCert pm) richmenSecrets
+    vssCertsList <- mapM (generateVssCert pm pc) richmenSecrets
     let toVss = mkVssCertificatesMap
         vssCerts = GenesisVssCertificatesMap $ toVss vssCertsList
 
@@ -243,14 +243,15 @@ generateFakeAvvmGenesis FakeAvvmOptions{..} = do
          , map snd fakeAvvmPubkeysAndSeeds
          , faoOneBalance * fromIntegral faoCount)
 
-generateVssCert ::
-       (HasProtocolConstants, MonadRandom m)
+generateVssCert
+    :: MonadRandom m
     => ProtocolMagic
+    -> ProtocolConstants
     -> RichSecrets
     -> m VssCertificate
-generateVssCert pm RichSecrets {..} = do
+generateVssCert pm pc RichSecrets {..} = do
     expiry <- fromInteger <$>
-        randomNumberInRange (vssMinTTL - 1) (vssMaxTTL - 1)
+        randomNumberInRange (vssMinTTL pc - 1) (vssMaxTTL pc - 1)
     let vssPk = asBinary $ toVssPublicKey rsVssKeyPair
         vssCert = mkVssCertificate pm rsPrimaryKey vssPk expiry
     return vssCert

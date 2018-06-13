@@ -14,6 +14,7 @@ import           Network.Kademlia (takeSnapshot)
 import           System.Wlog (WithLogger, logNotice)
 
 import           Pos.Binary.Class (serialize)
+import           Pos.Core (BlockCount, kEpochSlots, kSlotSecurityParam)
 import           Pos.Core.Slotting (flattenSlotId, slotIdF)
 import           Pos.Infra.Binary.DHTModel ()
 import           Pos.Infra.DHT.Constants (kademliaDumpInterval)
@@ -21,10 +22,9 @@ import           Pos.Infra.DHT.Real.Types (KademliaDHTInstance (..))
 import           Pos.Infra.Diffusion.Types (Diffusion)
 import           Pos.Infra.Recovery.Info (MonadRecoveryInfo, recoveryCommGuard)
 import           Pos.Infra.Reporting (MonadReporting)
+import           Pos.Infra.Shutdown (HasShutdownContext)
 import           Pos.Infra.Slotting.Class (MonadSlots)
 import           Pos.Infra.Slotting.Util (defaultOnNewSlotParams, onNewSlot)
-import           Pos.Infra.Shutdown (HasShutdownContext)
-import           Pos.Core (HasProtocolConstants)
 
 type DhtWorkMode ctx m =
     ( WithLogger m
@@ -40,22 +40,21 @@ type DhtWorkMode ctx m =
     )
 
 dhtWorkers
-    :: ( DhtWorkMode ctx m
-       , HasProtocolConstants
-       )
-    => KademliaDHTInstance -> [Diffusion m -> m ()]
-dhtWorkers kademliaInst@KademliaDHTInstance {..} =
-    [ dumpKademliaStateWorker kademliaInst ]
+    :: DhtWorkMode ctx m
+    => BlockCount
+    -> KademliaDHTInstance
+    -> [Diffusion m -> m ()]
+dhtWorkers k kademliaInst@KademliaDHTInstance {..} =
+    [ dumpKademliaStateWorker k kademliaInst ]
 
 dumpKademliaStateWorker
-    :: ( DhtWorkMode ctx m
-       , HasProtocolConstants
-       )
-    => KademliaDHTInstance
+    :: DhtWorkMode ctx m
+    => BlockCount
+    -> KademliaDHTInstance
     -> Diffusion m
     -> m ()
-dumpKademliaStateWorker kademliaInst = \_ -> onNewSlot onsp $ \slotId ->
-    when (isTimeToDump slotId) $ recoveryCommGuard "dump kademlia state" $ do
+dumpKademliaStateWorker k kademliaInst _ = onNewSlot (kEpochSlots k) onsp $ \slotId ->
+    when (isTimeToDump slotId) $ recoveryCommGuard (kSlotSecurityParam k) "dump kademlia state" $ do
         let dumpFile = kdiDumpPath kademliaInst
         logNotice $ sformat ("Dumping kademlia snapshot on slot: "%slotIdF) slotId
         let inst = kdiHandle kademliaInst
@@ -65,4 +64,4 @@ dumpKademliaStateWorker kademliaInst = \_ -> onNewSlot onsp $ \slotId ->
             Nothing -> return ()
   where
     onsp = defaultOnNewSlotParams
-    isTimeToDump slotId = flattenSlotId slotId `mod` kademliaDumpInterval == 0
+    isTimeToDump slotId = flattenSlotId (kEpochSlots k) slotId `mod` kademliaDumpInterval == 0

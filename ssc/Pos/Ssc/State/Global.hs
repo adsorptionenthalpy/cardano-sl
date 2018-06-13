@@ -19,7 +19,8 @@ import           System.Wlog (WithLogger, logDebug, logInfo)
 import           Universum
 
 import           Pos.Binary.Ssc ()
-import           Pos.Core (EpochIndex (..), SlotId (..), VssCertificatesMap (..), HasGenesisData, HasProtocolConstants)
+import           Pos.Core (BlockCount, EpochIndex (..), HasGenesisData, SlotId (..),
+                           VssCertificatesMap (..))
 import           Pos.DB (MonadDBRead)
 import qualified Pos.Ssc.DB as DB
 import           Pos.Ssc.Functions (getStableCertsPure)
@@ -42,10 +43,12 @@ getGlobalCerts sl =
 
 -- | Get stable VSS certificates for given epoch.
 getStableCerts
-    :: (MonadSscMem ctx m, MonadIO m, HasGenesisData, HasProtocolConstants)
-    => EpochIndex -> m VssCertificatesMap
-getStableCerts epoch =
-    getStableCertsPure epoch <$> sscRunGlobalQuery (view sgsVssCertificates)
+    :: (MonadSscMem ctx m, MonadIO m, HasGenesisData)
+    => BlockCount
+    -> EpochIndex
+    -> m VssCertificatesMap
+getStableCerts k epoch =
+    getStableCertsPure k epoch <$> sscRunGlobalQuery (view sgsVssCertificates)
 
 ----------------------------------------------------------------------------
 -- Seed

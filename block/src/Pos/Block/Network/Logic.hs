@@ -36,8 +36,8 @@ import qualified Pos.Block.Logic as L
 import           Pos.Block.RetrievalQueue (BlockRetrievalQueue, BlockRetrievalQueueTag,
                                            BlockRetrievalTask (..))
 import           Pos.Block.Types (Blund, LastKnownHeaderTag)
-import           Pos.Core (HasHeaderHash (..), HeaderHash, gbHeader, headerHashG, isMoreDifficult,
-                           prevBlockL)
+import           Pos.Core (HasHeaderHash (..), HeaderHash, ProtocolConstants, SlotCount, gbHeader,
+                           headerHashG, isMoreDifficult, prevBlockL)
 import           Pos.Core.Block (Block, BlockHeader, blockHeader)
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..), _NewestFirst,
                                   _OldestFirst)
@@ -94,10 +94,8 @@ instance Exception BlockNetLogicException where
 -- progress and 'ncRecoveryHeader' is full, we'll be requesting blocks anyway
 -- and until we're finished we shouldn't be asking for new blocks.
 triggerRecovery
-    :: ( BlockWorkMode ctx m
-       )
-    => ProtocolMagic -> Diffusion m -> m ()
-triggerRecovery pm diffusion = unlessM recoveryInProgress $ do
+    :: BlockWorkMode ctx m => ProtocolMagic -> SlotCount -> Diffusion m -> m ()
+triggerRecovery pm epochSlots diffusion = unlessM recoveryInProgress $ do
     logDebug "Recovery triggered, requesting tips from neighbors"
     -- The 'catch' here is for an exception when trying to enqueue the request.
     -- In 'requestTipsAndProcess', IO exceptions are caught, for each
@@ -120,24 +118,24 @@ triggerRecovery pm diffusion = unlessM recoveryInProgress $ do
         -- downloaded.
         bh <- mbh
         -- I know, it's not unsolicited. TODO rename.
-        handleUnsolicitedHeader pm bh nodeId
+        handleUnsolicitedHeader pm epochSlots bh nodeId
 
 ----------------------------------------------------------------------------
 -- Headers processing
 ----------------------------------------------------------------------------
 
 handleUnsolicitedHeader
-    :: ( BlockWorkMode ctx m
-       )
+    :: BlockWorkMode ctx m
     => ProtocolMagic
+    -> SlotCount
     -> BlockHeader
     -> NodeId
     -> m ()
-handleUnsolicitedHeader pm header nodeId = do
+handleUnsolicitedHeader pm epochSlots header nodeId = do
     logDebug $ sformat
         ("handleUnsolicitedHeader: single header was propagated, processing:\n"
          %build) header
-    classificationRes <- classifyNewHeader pm header
+    classificationRes <- classifyNewHeader pm epochSlots header
     -- TODO: should we set 'To' hash to hash of header or leave it unlimited?
     case classificationRes of
         CHContinues -> do
@@ -217,15 +215,14 @@ updateLastKnownHeader lastKnownH header = do
 
 -- | Carefully apply blocks that came from the network.
 handleBlocks
-    :: forall ctx m .
-       ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
+    :: forall ctx m
+     . (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
     => ProtocolMagic
+    -> ProtocolConstants
     -> OldestFirst NE Block
     -> Diffusion m
     -> m ()
-handleBlocks pm blocks diffusion = do
+handleBlocks pm pc blocks diffusion = do
     logDebug "handleBlocks: processing"
     inAssertMode $ logInfo $
         sformat ("Processing sequence of blocks: " % buildListBounds % "...") $
@@ -243,20 +240,19 @@ handleBlocks pm blocks diffusion = do
         logDebug $ sformat ("Handling block w/ LCA, which is "%shortHashF) lcaHash
         -- Head blund in result is the youngest one.
         toRollback <- DB.loadBlundsFromTipWhile $ \blk -> headerHash blk /= lcaHash
-        maybe (applyWithoutRollback pm diffusion blocks)
-              (applyWithRollback pm diffusion blocks lcaHash)
+        maybe (applyWithoutRollback pm pc diffusion blocks)
+              (applyWithRollback pm pc diffusion blocks lcaHash)
               (_NewestFirst nonEmpty toRollback)
 
 applyWithoutRollback
-    :: forall ctx m.
-       ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
+    :: forall ctx m
+     . (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
     => ProtocolMagic
+    -> ProtocolConstants
     -> Diffusion m
     -> OldestFirst NE Block
     -> m ()
-applyWithoutRollback pm diffusion blocks = do
+applyWithoutRollback pm pc diffusion blocks = do
     logInfo . sformat ("Trying to apply blocks w/o rollback. " % multilineBounds 6)
        . getOldestFirst . map (view blockHeader) $ blocks
     modifyStateLock HighPriority ApplyBlock applyWithoutRollbackDo >>= \case
@@ -285,27 +281,26 @@ applyWithoutRollback pm diffusion blocks = do
         :: HeaderHash -> m (HeaderHash, Either ApplyBlocksException HeaderHash)
     applyWithoutRollbackDo curTip = do
         logInfo "Verifying and applying blocks..."
-        res <- verifyAndApplyBlocks pm False blocks
+        res <- verifyAndApplyBlocks pm pc False blocks
         logInfo "Verifying and applying blocks done"
         let newTip = either (const curTip) identity res
         pure (newTip, res)
 
 applyWithRollback
-    :: ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
+    :: (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
     => ProtocolMagic
+    -> ProtocolConstants
     -> Diffusion m
     -> OldestFirst NE Block
     -> HeaderHash
     -> NewestFirst NE Blund
     -> m ()
-applyWithRollback pm diffusion toApply lca toRollback = do
+applyWithRollback pm pc diffusion toApply lca toRollback = do
     logInfo . sformat ("Trying to apply blocks w/o rollback. " % multilineBounds 6)
        . getOldestFirst . map (view blockHeader) $ toApply
     logInfo $ sformat ("Blocks to rollback "%listJson) toRollbackHashes
     res <- modifyStateLock HighPriority ApplyBlockWithRollback $ \curTip -> do
-        res <- L.applyWithRollback pm toRollback toApplyAfterLca
+        res <- L.applyWithRollback pm pc toRollback toApplyAfterLca
         pure (either (const curTip) identity res, res)
     case res of
         Left (pretty -> err) ->

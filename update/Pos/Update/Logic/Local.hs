@@ -33,8 +33,8 @@ import           System.Wlog (WithLogger, logWarning)
 import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Binary.Class (biSize)
-import           Pos.Core (BlockVersionData (bvdMaxBlockSize), HeaderHash, ProtocolMagic,
-                           SlotId (..), slotIdF)
+import           Pos.Core (BlockCount, BlockVersionData (bvdMaxBlockSize), HeaderHash,
+                           ProtocolMagic, SlotId (..), slotIdF)
 import           Pos.Core.Update (UpId, UpdatePayload (..), UpdateProposal, UpdateVote (..))
 import           Pos.Crypto (PublicKey, shortHashF)
 import           Pos.DB.Class (MonadDBRead)
@@ -122,9 +122,10 @@ processSkeleton ::
        , MonadReporting m
        )
     => ProtocolMagic
+    -> BlockCount
     -> UpdatePayload
     -> m (Either PollVerFailure ())
-processSkeleton pm payload =
+processSkeleton pm k payload =
     reportUnexpectedError $
     withUSLock $
     runExceptT $
@@ -151,7 +152,7 @@ processSkeleton pm payload =
         modifierOrFailure <-
             lift . runDBPoll . runExceptT . evalPollT msModifier . execPollT def $ do
                 lastAdopted <- getAdoptedBV
-                verifyAndApplyUSPayload pm lastAdopted True (Left msSlot) payload
+                verifyAndApplyUSPayload pm k lastAdopted True (Left msSlot) payload
         case modifierOrFailure of
             Left failure -> throwError failure
             Right modifier -> do
@@ -211,11 +212,13 @@ getLocalProposalNVotes id = do
 -- Otherwise 'Left err' is returned and 'err' lets caller decide whether
 -- sender could be sure that error would happen.
 processProposal
-    :: ( USLocalLogicModeWithLock ctx m
-       , MonadReporting m
-       )
-    => ProtocolMagic -> UpdateProposal -> m (Either PollVerFailure ())
-processProposal pm proposal = processSkeleton pm $ UpdatePayload (Just proposal) []
+    :: (USLocalLogicModeWithLock ctx m, MonadReporting m)
+    => ProtocolMagic
+    -> BlockCount
+    -> UpdateProposal
+    -> m (Either PollVerFailure ())
+processProposal pm k proposal =
+    processSkeleton pm k $ UpdatePayload (Just proposal) []
 
 ----------------------------------------------------------------------------
 -- Votes
@@ -262,11 +265,12 @@ getLocalVote propId pk decision = do
 -- Otherwise 'Left err' is returned and 'err' lets caller decide whether
 -- sender could be sure that error would happen.
 processVote
-    :: ( USLocalLogicModeWithLock ctx m
-       , MonadReporting m
-       )
-    => ProtocolMagic -> UpdateVote -> m (Either PollVerFailure ())
-processVote pm vote = processSkeleton pm $ UpdatePayload Nothing [vote]
+    :: (USLocalLogicModeWithLock ctx m, MonadReporting m)
+    => ProtocolMagic
+    -> BlockCount
+    -> UpdateVote
+    -> m (Either PollVerFailure ())
+processVote pm k vote = processSkeleton pm k $ UpdatePayload Nothing [vote]
 
 ----------------------------------------------------------------------------
 -- Normalization and related

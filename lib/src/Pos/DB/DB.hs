@@ -1,6 +1,3 @@
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE TypeFamilies        #-}
-
 -- | Higher-level DB functionality.
 
 module Pos.DB.DB
@@ -11,7 +8,8 @@ module Pos.DB.DB
 import           Universum
 
 import           Pos.Block.Base (genesisBlock0)
-import           Pos.Core (BlockVersionData, GenesisHash (..), genesisHash, headerHash)
+import           Pos.Core (BlockVersionData, GenesisHash (..), ProtocolConstants, genesisHash,
+                           headerHash, pcEpochSlots)
 import           Pos.Crypto (ProtocolMagic)
 import           Pos.DB.Block (prepareBlockDB)
 import           Pos.DB.Class (MonadDB, MonadDBRead (..))
@@ -22,18 +20,19 @@ import           Pos.Update.DB (getAdoptedBVData)
 
 -- | Initialize DBs if necessary.
 initNodeDBs
-    :: forall ctx m.
-       ( MonadReader ctx m
-       , MonadDB m
-       )
-    => ProtocolMagic -> m ()
-initNodeDBs pm = do
+    :: forall ctx m
+     . (MonadReader ctx m, MonadDB m)
+    => ProtocolMagic
+    -> ProtocolConstants
+    -> m ()
+initNodeDBs pm pc = do
     let initialTip = headerHash gb
     prepareBlockDB gb
-    prepareGStateDB initialTip
-    prepareLrcDB
+    prepareGStateDB pc initialTip
+    prepareLrcDB epochSlots
   where
-    gb = genesisBlock0 pm (GenesisHash genesisHash) genesisLeaders
+    epochSlots = pcEpochSlots pc
+    gb = genesisBlock0 pm (GenesisHash genesisHash) (genesisLeaders epochSlots)
 
 ----------------------------------------------------------------------------
 -- MonadGState instance

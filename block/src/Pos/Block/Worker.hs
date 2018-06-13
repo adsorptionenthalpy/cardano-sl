@@ -32,10 +32,13 @@ import           Pos.Block.Slog (scCQFixedMonitorState, scCQOverallMonitorState,
                                  scCrucialValuesLabel, scDifficultyMonitorState,
                                  scEpochMonitorState, scGlobalSlotMonitorState,
                                  scLocalSlotMonitorState, slogGetLastSlots)
-import           Pos.Core (BlockVersionData (..), ChainDifficulty, FlatSlotId, HasProtocolConstants,
-                           SlotId (..), Timestamp (Timestamp), addressHash, blkSecurityParam,
-                           difficultyL, epochOrSlotToSlot, epochSlots, flattenSlotId, gbHeader,
-                           getEpochOrSlot, getOurPublicKey, getSlotIndex, slotIdF, unflattenSlotId)
+import           Pos.Core (BlockCount, BlockVersionData (..), ChainDifficulty, FlatSlotId,
+                           ProtocolConstants, SlotCount, SlotId (..), Timestamp (Timestamp),
+                           addressHash, difficultyL, epochOrSlotToSlot, flattenSlotId, gbHeader,
+                           getEpochOrSlot, getOurPublicKey, getSlotIndex, kEpochSlots,
+                           kSlotSecurityParam, localSlotIndexFromEnum, localSlotIndexMinBound,
+                           pcBlkSecurityParam, pcEpochSlots, pcSlotSecurityParam, slotIdF,
+                           slotIdSucc, unflattenSlotId)
 import           Pos.Core.Chrono (OldestFirst (..))
 import           Pos.Crypto (ProtocolMagic, ProxySecretKey (pskDelegatePk))
 import           Pos.DB (gsIsBootstrapEra)
@@ -45,8 +48,7 @@ import           Pos.Delegation.Logic (getDlgTransPsk)
 import           Pos.Delegation.Types (ProxySKBlockInfo)
 import           Pos.Infra.Diffusion.Types (Diffusion)
 import qualified Pos.Infra.Diffusion.Types as Diffusion (Diffusion (announceBlockHeader))
-import           Pos.Infra.Recovery.Info (getSyncStatus, getSyncStatusK, needTriggerRecovery,
-                                          recoveryCommGuard)
+import           Pos.Infra.Recovery.Info (getSyncStatus, needTriggerRecovery, recoveryCommGuard)
 import           Pos.Infra.Reporting (HasMisbehaviorMetrics, MetricMonitor (..), MetricMonitorState,
                                       noReportMonitor, recordValue, reportOrLogE)
 import           Pos.Infra.Slotting (ActionTerminationPolicy (..), OnNewSlotParams (..),
@@ -65,36 +67,40 @@ import           Pos.Update.DB (getAdoptedBVData)
 
 -- | All workers specific to block processing.
 blkWorkers
-    :: ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic -> [Diffusion m -> m ()]
-blkWorkers pm =
-    [ blkCreatorWorker pm
-    , informerWorker
-    , retrievalWorker pm
-    , recoveryTriggerWorker pm
+    :: (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => ProtocolMagic
+    -> ProtocolConstants
+    -> [Diffusion m -> m ()]
+blkWorkers pm pc =
+    [ blkCreatorWorker pm pc
+    , informerWorker (pcBlkSecurityParam pc)
+    , retrievalWorker pm pc
+    , recoveryTriggerWorker pm (pcBlkSecurityParam pc)
     ]
 
-informerWorker
-    :: ( BlockWorkMode ctx m
-    ) => Diffusion m -> m ()
-informerWorker =
-    \_ -> onNewSlot defaultOnNewSlotParams $ \slotId ->
-        recoveryCommGuard "onNewSlot worker, informerWorker" $ do
-            tipHeader <- DB.getTipHeader
-            -- Printe tip header
-            logDebug $ sformat ("Our tip header: "%build) tipHeader
-            -- Print the difference between tip slot and current slot.
-            logHowManySlotsBehind slotId tipHeader
-            -- Compute and report metrics
-            metricWorker slotId
+informerWorker :: BlockWorkMode ctx m => BlockCount -> Diffusion m -> m ()
+informerWorker k _ = onNewSlot epochSlots defaultOnNewSlotParams $ \slotId ->
+    recoveryCommGuard (kSlotSecurityParam k) "onNewSlot worker, informerWorker"
+        $ do
+              tipHeader <- DB.getTipHeader
+              -- Printe tip header
+              logDebug $ sformat ("Our tip header: " % build) tipHeader
+              -- Print the difference between tip slot and current slot.
+              logHowManySlotsBehind slotId tipHeader
+              -- Compute and report metrics
+              metricWorker k slotId
   where
+    epochSlots = kEpochSlots k
     logHowManySlotsBehind slotId tipHeader =
-        let tipSlot = epochOrSlotToSlot (getEpochOrSlot tipHeader)
-            slotDiff = flattenSlotId slotId - flattenSlotId tipSlot
-        in logInfo $ sformat ("Difference between current slot and tip slot is: "
-                              %int) slotDiff
+        let
+            tipSlot = epochOrSlotToSlot (getEpochOrSlot tipHeader)
+            slotDiff =
+                flattenSlotId epochSlots slotId
+                    - flattenSlotId epochSlots tipSlot
+        in
+            logInfo $ sformat
+                ("Difference between current slot and tip slot is: " % int)
+                slotDiff
 
 
 ----------------------------------------------------------------------------
@@ -102,13 +108,14 @@ informerWorker =
 ----------------------------------------------------------------------------
 
 blkCreatorWorker
-    :: ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       ) => ProtocolMagic -> Diffusion m -> m ()
-blkCreatorWorker pm =
-    \diffusion -> onNewSlot onsp $ \slotId ->
-        recoveryCommGuard "onNewSlot worker, blkCreatorWorker" $
-        blockCreator pm slotId diffusion `catchAny` onBlockCreatorException
+    :: (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => ProtocolMagic
+    -> ProtocolConstants
+    -> Diffusion m
+    -> m ()
+blkCreatorWorker pm pc diffusion = onNewSlot (pcEpochSlots pc) onsp $ \slotId ->
+        recoveryCommGuard (pcSlotSecurityParam pc) "onNewSlot worker, blkCreatorWorker" $
+        blockCreator pm pc slotId diffusion `catchAny` onBlockCreatorException
   where
     onBlockCreatorException = reportOrLogE "blockCreator failed: "
     onsp :: OnNewSlotParams
@@ -117,17 +124,19 @@ blkCreatorWorker pm =
         {onspTerminationPolicy = NewSlotTerminationPolicy "block creator"}
 
 blockCreator
-    :: ( BlockWorkMode ctx m
-       , HasMisbehaviorMetrics ctx
-       )
-    => ProtocolMagic -> SlotId -> Diffusion m -> m ()
-blockCreator pm (slotId@SlotId {..}) diffusion = do
+    :: (BlockWorkMode ctx m, HasMisbehaviorMetrics ctx)
+    => ProtocolMagic
+    -> ProtocolConstants
+    -> SlotId
+    -> Diffusion m
+    -> m ()
+blockCreator pm pc (slotId@SlotId {..}) diffusion = do
 
     -- First of all we create genesis block if necessary.
-    mGenBlock <- createGenesisBlockAndApply pm siEpoch
+    mGenBlock <- createGenesisBlockAndApply pm pc siEpoch
     whenJust mGenBlock $ \createdBlk -> do
         logInfo $ sformat ("Created genesis block:\n" %build) createdBlk
-        jsonLog $ jlCreatedBlock (Left createdBlk)
+        jsonLog $ jlCreatedBlock (pcEpochSlots pc) (Left createdBlk)
 
     -- Then we get leaders for current epoch.
     leadersMaybe <- LrcDB.getLeadersForEpoch siEpoch
@@ -144,8 +153,8 @@ blockCreator pm (slotId@SlotId {..}) diffusion = do
   where
     onNoLeader =
         logError "Couldn't find a leader for current slot among known ones"
-    logOnEpochFS = if siSlot == minBound then logInfoS else logDebugS
-    logOnEpochF = if siSlot == minBound then logInfo else logDebug
+    logOnEpochFS = if siSlot == localSlotIndexMinBound then logInfoS else logDebugS
+    logOnEpochF = if siSlot == localSlotIndexMinBound then logInfo else logDebug
     onKnownLeader leaders leader = do
         ourPk <- getOurPublicKey
         let ourPkHash = addressHash ourPk
@@ -160,7 +169,7 @@ blockCreator pm (slotId@SlotId {..}) diffusion = do
             dropAround p s = take (2*s + 1) . drop (max 0 (p - s))
             strLeaders = map (bprint pairF) (enumerate @Int (toList leaders))
         logDebug $ sformat ("Trimmed leaders: "%listJson)
-                 $ dropAround (fromEnum siSlot) 10 strLeaders
+                 $ dropAround (localSlotIndexFromEnum siSlot) 10 strLeaders
 
         ourHeavyPsk <- getPskByIssuer (Left ourPk)
         let heavyWeAreIssuer = isJust ourHeavyPsk
@@ -176,21 +185,21 @@ blockCreator pm (slotId@SlotId {..}) diffusion = do
                   "delegated by heavy psk: "%build)
                  ourHeavyPsk
            | weAreLeader ->
-                 onNewSlotWhenLeader pm slotId Nothing diffusion
+                 onNewSlotWhenLeader pm pc slotId Nothing diffusion
            | heavyWeAreDelegate ->
                  let pske = swap <$> dlgTransM
-                 in onNewSlotWhenLeader pm slotId pske diffusion
+                 in onNewSlotWhenLeader pm pc slotId pske diffusion
            | otherwise -> pass
 
 onNewSlotWhenLeader
-    :: ( BlockWorkMode ctx m
-       )
+    :: BlockWorkMode ctx m
     => ProtocolMagic
+    -> ProtocolConstants
     -> SlotId
     -> ProxySKBlockInfo
     -> Diffusion m
     -> m ()
-onNewSlotWhenLeader pm slotId pske diffusion = do
+onNewSlotWhenLeader pm pc slotId pske diffusion = do
     let logReason =
             sformat ("I have a right to create a block for the slot "%slotIdF%" ")
                     slotId
@@ -198,7 +207,7 @@ onNewSlotWhenLeader pm slotId pske diffusion = do
         logCert (psk,_) =
             sformat ("using heavyweight proxy signature key "%build%", will do it soon") psk
     logInfoS $ logReason <> maybe logLeader logCert pske
-    nextSlotStart <- getSlotStartEmpatically (succ slotId)
+    nextSlotStart <- getSlotStartEmpatically (slotIdSucc (pcEpochSlots pc) slotId)
     currentTime <- currentTimeSlotting
     let timeToCreate =
             max currentTime (nextSlotStart - Timestamp networkDiameter)
@@ -210,13 +219,13 @@ onNewSlotWhenLeader pm slotId pske diffusion = do
   where
     onNewSlotWhenLeaderDo = do
         logInfoS "It's time to create a block for current slot"
-        createdBlock <- createMainBlockAndApply pm slotId pske
+        createdBlock <- createMainBlockAndApply pm pc slotId pske
         either whenNotCreated whenCreated createdBlock
         logInfoS "onNewSlotWhenLeader: done"
     whenCreated createdBlk = do
             logInfoS $
                 sformat ("Created a new block:\n" %build) createdBlk
-            jsonLog $ jlCreatedBlock (Right createdBlk)
+            jsonLog $ jlCreatedBlock (pcEpochSlots pc) (Right createdBlk)
             void $ Diffusion.announceBlockHeader diffusion $ createdBlk ^. gbHeader
     whenNotCreated = logWarningS . (mappend "I couldn't create a new block: ")
 
@@ -225,21 +234,23 @@ onNewSlotWhenLeader pm slotId pske diffusion = do
 ----------------------------------------------------------------------------
 
 recoveryTriggerWorker
-    :: forall ctx m.
-       ( BlockWorkMode ctx m
-       )
-    => ProtocolMagic -> Diffusion m -> m ()
-recoveryTriggerWorker pm diffusion = do
+    :: forall ctx m
+     . BlockWorkMode ctx m
+    => ProtocolMagic
+    -> BlockCount
+    -> Diffusion m
+    -> m ()
+recoveryTriggerWorker pm k diffusion = do
     -- Initial heuristic delay is needed (the system takes some time
     -- to initialize).
     -- TBD why 3 seconds? Why delay at all? Come on, we can do better.
     delay (3 :: Second)
 
     repeatOnInterval $ do
-        doTrigger <- needTriggerRecovery <$> getSyncStatusK
+        doTrigger <- needTriggerRecovery <$> getSyncStatus (kSlotSecurityParam k)
         when doTrigger $ do
             logInfo "Triggering recovery because we need it"
-            triggerRecovery pm diffusion
+            triggerRecovery pm (kEpochSlots k) diffusion
 
         -- Sometimes we want to trigger recovery just in case. Maybe
         -- we're just 5 slots late, but nobody wants to send us
@@ -254,7 +265,7 @@ recoveryTriggerWorker pm diffusion = do
             logInfo "Checking if we need recovery as a safety measure"
             whenM (needTriggerRecovery <$> getSyncStatus 5) $ do
                 logInfo "Triggering recovery as a safety measure"
-                triggerRecovery pm diffusion
+                triggerRecovery pm (kEpochSlots k) diffusion
 
         -- We don't want to ask for tips too frequently.
         -- E.g. there may be a tip processing mistake so that we
@@ -284,14 +295,12 @@ recoveryTriggerWorker pm diffusion = do
 -- warnings when this assumption is close to being violated.
 --
 -- Apart from chain quality check we also record some generally useful values.
-metricWorker
-    :: BlockWorkMode ctx m
-    => SlotId -> m ()
-metricWorker curSlot = do
+metricWorker :: BlockWorkMode ctx m => BlockCount -> SlotId -> m ()
+metricWorker k curSlot = do
     OldestFirst lastSlots <- slogGetLastSlots
     reportTotalBlocks
-    reportSlottingData curSlot
-    reportCrucialValues
+    reportSlottingData (kEpochSlots k) curSlot
+    reportCrucialValues k
     -- If total number of blocks is less than `blkSecurityParam' we do
     -- nothing with regards to chain quality for two reasons:
     -- 1. Usually after we deploy cluster we monitor it manually for a while.
@@ -300,8 +309,8 @@ metricWorker curSlot = do
     case nonEmpty lastSlots of
         Nothing -> pass
         Just slotsNE
-            | length slotsNE < fromIntegral blkSecurityParam -> pass
-            | otherwise -> chainQualityChecker curSlot (NE.head slotsNE)
+            | length slotsNE < fromIntegral k -> pass
+            | otherwise -> chainQualityChecker k curSlot (NE.head slotsNE)
 
 ----------------------------------------------------------------------------
 -- -- General metrics
@@ -320,8 +329,8 @@ difficultyMonitor ::
        MetricMonitorState ChainDifficulty -> MetricMonitor ChainDifficulty
 difficultyMonitor = noReportMonitor fromIntegral Nothing
 
-reportSlottingData :: BlockWorkMode ctx m => SlotId -> m ()
-reportSlottingData slotId = do
+reportSlottingData :: BlockWorkMode ctx m => SlotCount -> SlotId -> m ()
+reportSlottingData epochSlots slotId = do
     -- epoch
     let epoch = siEpoch slotId
     epochMonitor <-
@@ -334,20 +343,19 @@ reportSlottingData slotId = do
         view scLocalSlotMonitorState
     recordValue localSlotMonitor localSlot
     -- global slot
-    let globalSlot = flattenSlotId slotId
+    let globalSlot = flattenSlotId epochSlots slotId
     globalSlotMonitor <-
         noReportMonitor fromIntegral Nothing <$>
         view scGlobalSlotMonitorState
     recordValue globalSlotMonitor globalSlot
 
-reportCrucialValues :: BlockWorkMode ctx m => m ()
-reportCrucialValues = do
+reportCrucialValues :: BlockWorkMode ctx m => BlockCount -> m ()
+reportCrucialValues k = do
     label <- view scCrucialValuesLabel
     BlockVersionData {..} <- getAdoptedBVData
     let slotDur = bvdSlotDuration
-    let epochDur = fromIntegral epochSlots * slotDur
-    let crucialValuesText =
-            sformat crucialValuesFmt slotDur epochDur blkSecurityParam
+    let epochDur = fromIntegral (kEpochSlots k) * slotDur
+    let crucialValuesText = sformat crucialValuesFmt slotDur epochDur k
     liftIO $ Label.set label crucialValuesText
   where
     crucialValuesFmt =
@@ -357,33 +365,32 @@ reportCrucialValues = do
 -- -- Chain quality
 ----------------------------------------------------------------------------
 
-chainQualityChecker ::
-       ( BlockWorkMode ctx m
-       )
-    => SlotId
-    -> FlatSlotId
-    -> m ()
-chainQualityChecker curSlot kThSlot = do
+chainQualityChecker
+    :: BlockWorkMode ctx m => BlockCount -> SlotId -> FlatSlotId -> m ()
+chainQualityChecker k curSlot kThSlot = do
     logDebug $ sformat ("Block with depth 'k' ("%int%
                         ") was created during slot "%slotIdF)
-        blkSecurityParam (unflattenSlotId kThSlot)
-    let curFlatSlot = flattenSlotId curSlot
+        k (unflattenSlotId epochSlots kThSlot)
+    let curFlatSlot = flattenSlotId epochSlots curSlot
     isBootstrapEra <- gsIsBootstrapEra (siEpoch curSlot)
     monitorStateK <- view scCQkMonitorState
-    let monitorK = cqkMetricMonitor monitorStateK isBootstrapEra
+    let monitorK = cqkMetricMonitor k monitorStateK isBootstrapEra
     monitorOverall <- cqOverallMetricMonitor <$> view scCQOverallMonitorState
     monitorFixed <- cqFixedMetricMonitor <$> view scCQFixedMonitorState
-    whenJustM (calcChainQualityM curFlatSlot) (recordValue monitorK)
-    whenJustM calcOverallChainQuality $ recordValue monitorOverall
-    whenJustM calcChainQualityFixedTime $ recordValue monitorFixed
+    whenJustM (calcChainQualityM k curFlatSlot) (recordValue monitorK)
+    whenJustM (calcOverallChainQuality epochSlots) $ recordValue monitorOverall
+    whenJustM (calcChainQualityFixedTime epochSlots) $ recordValue monitorFixed
+  where
+    epochSlots = kEpochSlots k
 
 -- Monitor for chain quality for last k blocks.
-cqkMetricMonitor ::
-       ( HasBlockConfiguration, HasProtocolConstants )
-    => MetricMonitorState Double
+cqkMetricMonitor
+    :: HasBlockConfiguration
+    => BlockCount
+    -> MetricMonitorState Double
     -> Bool
     -> MetricMonitor Double
-cqkMetricMonitor st isBootstrapEra =
+cqkMetricMonitor k st isBootstrapEra =
     MetricMonitor
     { mmState = st
     , mmReportMisbehaviour = classifier
@@ -412,7 +419,7 @@ cqkMetricMonitor st isBootstrapEra =
         | otherwise = nonCriticalCQ
     -- Can be used to insert the value of 'blkSecurityParam' into a 'Format'.
     kFormat :: Format r r
-    kFormat = now (bprint int blkSecurityParam)
+    kFormat = now (bprint int k)
 
 cqOverallMetricMonitor :: MetricMonitorState Double -> MetricMonitor Double
 cqOverallMetricMonitor = noReportMonitor convertCQ (Just debugFormat)

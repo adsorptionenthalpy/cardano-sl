@@ -17,9 +17,9 @@ import           Universum
 import           Data.Default (Default (def))
 
 import           Pos.Block.BHelpers ()
-import           Pos.Core (BlockVersion, ChainDifficulty, EpochIndex, GenesisHash (..),
-                           HasDifficulty (..), HasProtocolConstants, HeaderHash, LocalSlotIndex,
-                           SlotId, SlotLeaders, SoftwareVersion, headerHash)
+import           Pos.Core (BlockCount, BlockVersion, ChainDifficulty, EpochIndex, GenesisHash (..),
+                           HasDifficulty (..), HeaderHash, LocalSlotIndex, SlotId, SlotLeaders,
+                           SoftwareVersion, headerHash)
 import           Pos.Core.Block (BlockHeader, BlockSignature (..), GenericBlock (..), GenesisBlock,
                                  GenesisBlockHeader, GenesisBody (..), GenesisConsensusData (..),
                                  GenesisExtraBodyData (..), GenesisExtraHeaderData (..), MainBlock,
@@ -134,13 +134,13 @@ mkMainBlockExplicit pm bv sv prevHash difficulty slotId sk pske body =
 
 -- | Empty (i. e. no payload) body of main block for given local slot index.
 emptyMainBody
-    :: HasProtocolConstants
-    => LocalSlotIndex
+    :: BlockCount
+    -> LocalSlotIndex
     -> MainBody
-emptyMainBody slot =
+emptyMainBody k slot =
     MainBody
     { _mbTxPayload = emptyTxPayload
-    , _mbSscPayload = defaultSscPayload slot
+    , _mbSscPayload = defaultSscPayload k slot
     , _mbDlgPayload = def
     , _mbUpdatePayload = def
     }

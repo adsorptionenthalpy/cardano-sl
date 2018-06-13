@@ -32,10 +32,10 @@ import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Block.Logic.Integrity (VerifyHeaderParams (..), verifyHeader, verifyHeaders)
 import           Pos.Block.Logic.Util (lcaWithMainChain)
-import           Pos.Core (BlockCount, EpochOrSlot (..), HeaderHash, SlotId (..), blkSecurityParam,
+import           Pos.Core (BlockCount, EpochOrSlot (..), HeaderHash, SlotCount, SlotId (..),
                            bvdMaxHeaderSize, difficultyL, epochIndexL, epochOrSlotG,
                            getChainDifficulty, getEpochOrSlot, headerHash, headerHashG, headerSlotL,
-                           prevBlockL)
+                           kEpochSlots, localSlotIndexMinBound, prevBlockL)
 import           Pos.Core.Block (BlockHeader (..))
 import           Pos.Core.Chrono (NE, NewestFirst (..), OldestFirst (..), toNewestFirst,
                                   toOldestFirst, _NewestFirst, _OldestFirst)
@@ -75,16 +75,16 @@ mkCHRinvalid = CHInvalid . T.intercalate "; "
 -- | Classify new header announced by some node. Result is represented
 -- as ClassifyHeaderRes type.
 classifyNewHeader
-    :: forall ctx m.
-    ( MonadSlots ctx m
-    , MonadDBRead m
-    , MonadUnliftIO m
-    )
-    => ProtocolMagic -> BlockHeader -> m ClassifyHeaderRes
+    :: forall ctx m
+     . (MonadSlots ctx m, MonadDBRead m, MonadUnliftIO m)
+    => ProtocolMagic
+    -> SlotCount
+    -> BlockHeader
+    -> m ClassifyHeaderRes
 -- Genesis headers seem useless, we can create them by ourselves.
-classifyNewHeader _ (BlockHeaderGenesis _) = pure $ CHUseless "genesis header is useless"
-classifyNewHeader pm (BlockHeaderMain header) = fmap (either identity identity) <$> runExceptT $ do
-    curSlot <- getCurrentSlot
+classifyNewHeader _ _ (BlockHeaderGenesis _) = pure $ CHUseless "genesis header is useless"
+classifyNewHeader pm epochSlots (BlockHeaderMain header) = fmap (either identity identity) <$> runExceptT $ do
+    curSlot <- getCurrentSlot epochSlots
     tipHeader <- lift DB.getTipHeader
     let tipEoS = getEpochOrSlot tipHeader
     let newHeaderEoS = getEpochOrSlot header
@@ -169,10 +169,11 @@ classifyHeaders ::
        , WithLogger m
        )
     => ProtocolMagic
+    -> BlockCount
     -> Bool -- recovery in progress?
     -> NewestFirst NE BlockHeader
     -> m ClassifyHeadersRes
-classifyHeaders pm inRecovery headers = do
+classifyHeaders pm k inRecovery headers = do
     tipHeader <- DB.getTipHeader
     let tip = headerHash tipHeader
     haveOldestParent <- isJust <$> DB.getHeader oldestParentHash
@@ -180,10 +181,10 @@ classifyHeaders pm inRecovery headers = do
     let headersValid =
             isVerSuccess $
             verifyHeaders pm leaders (headers & _NewestFirst %~ toList)
-    mbCurrentSlot <- getCurrentSlot
+    mbCurrentSlot <- getCurrentSlot $ kEpochSlots k
     let newestHeaderConvertedSlot =
             case newestHeader ^. epochOrSlotG of
-                EpochOrSlot (Left e)  -> SlotId e minBound
+                EpochOrSlot (Left e)  -> SlotId e localSlotIndexMinBound
                 EpochOrSlot (Right s) -> s
     if
        | newestHash == headerHash tip ->
@@ -236,11 +237,11 @@ classifyHeaders pm inRecovery headers = do
         pure $ if
             | hash lca == hash tipHeader -> CHsValid lcaChild
             | depthDiff < 0 -> error "classifyHeaders@depthDiff is negative"
-            | depthDiff > blkSecurityParam ->
+            | depthDiff > k ->
                   CHsUseless $
                   sformat ("Difficulty difference of (tip,lca) is "%int%
                            " which is more than blkSecurityParam = "%int)
-                          depthDiff blkSecurityParam
+                          depthDiff k
             | otherwise -> CHsValid lcaChild
 
 
@@ -308,8 +309,10 @@ getHeadersFromManyTo mLimit checkpoints startM = runExceptT $ do
 -- exponentially base 2 relatively to the depth in the blockchain.
 getHeadersOlderExp
     :: MonadDBRead m
-    => Maybe HeaderHash -> m (OldestFirst NE HeaderHash)
-getHeadersOlderExp upto = do
+    => BlockCount
+    -> Maybe HeaderHash
+    -> m (OldestFirst NE HeaderHash)
+getHeadersOlderExp k upto = do
     tip <- GS.getTip
     let upToReal = fromMaybe tip upto
     -- Using 'blkSecurityParam + 1' because fork can happen on k+1th one.
@@ -317,7 +320,7 @@ getHeadersOlderExp upto = do
         -- loadHeadersByDepth always returns nonempty list unless you
         -- pass depth 0 (we pass k+1). It throws if upToReal is
         -- absent. So it either throws or returns nonempty.
-        DB.loadHeadersByDepth (blkSecurityParam + 1) upToReal
+        DB.loadHeadersByDepth (k + 1) upToReal
     let toNE = fromMaybe (error "getHeadersOlderExp: couldn't create nonempty") .
                nonEmpty
     let selectedHashes :: NewestFirst [] HeaderHash
