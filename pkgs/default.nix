@@ -14644,6 +14644,7 @@ license = stdenv.lib.licenses.bsd3;
 , criterion
 , cryptonite
 , data-default
+, deepseq
 , directory
 , ed25519
 , ekg-core
@@ -14665,8 +14666,10 @@ license = stdenv.lib.licenses.bsd3;
 , neat-interpolation
 , network
 , network-transport
+, network-transport-tcp
 , optparse-applicative
 , parsec
+, pipes
 , plutus-prototype
 , pvss
 , QuickCheck
@@ -14770,6 +14773,7 @@ network
 network-transport
 optparse-applicative
 parsec
+pipes
 plutus-prototype
 pvss
 QuickCheck
@@ -14833,6 +14837,7 @@ cborg
 containers
 cryptonite
 data-default
+deepseq
 extra
 filelock
 fmt
@@ -14841,12 +14846,16 @@ generic-arbitrary
 hspec
 lens
 mtl
+network-transport
+network-transport-tcp
+pipes
 pvss
 QuickCheck
 random
 reflection
 safecopy
 serokell-util
+stm
 tagged
 text
 text-format
@@ -14858,18 +14867,32 @@ vector
 benchmarkHaskellDepends = [
 aeson
 base
+bytestring
 cardano-sl-block
 cardano-sl-core
 cardano-sl-crypto
 cardano-sl-crypto-test
+cardano-sl-infra
 cardano-sl-lrc
+cardano-sl-networking
 cardano-sl-ssc
 cardano-sl-txp
 cardano-sl-txp-test
+cardano-sl-util
 cardano-sl-util-test
 criterion
+deepseq
 formatting
+log-warper
+network
+network-transport
+network-transport-tcp
+optparse-applicative
+pipes
 QuickCheck
+stm
+time-units
+transformers
 universum
 vector
 ];
@@ -15279,6 +15302,7 @@ license = stdenv.lib.licenses.mit;
 , lens
 , log-warper
 , mtl
+, pipes
 , random
 , reflection
 , rocksdb-haskell-ng
@@ -15333,6 +15357,7 @@ formatting
 lens
 log-warper
 mtl
+pipes
 random
 reflection
 rocksdb-haskell-ng
