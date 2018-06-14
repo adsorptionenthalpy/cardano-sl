@@ -397,7 +397,7 @@ benchmark cardano-bench-criterion
   other-modules:       Bench.Pos.Criterion.FollowTheSatoshiBench
                        Bench.Pos.Criterion.TxSigningBench
                        Bench.Configuration
-                       Bench.Pos.Diffusion.BlockDownload
+                       --Bench.Pos.Diffusion.BlockDownload
   type:                exitcode-stdio-1.0
   build-depends:       QuickCheck
                      , aeson
